@@ -1,14 +1,17 @@
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
-
+import time
+from fastapi import Request
 from .database import Base, engine, get_db
 from .schemas import TransactionCreate, TransactionResponse
 from .crud import get_transaction, create_transaction
 from .worker import process_transaction
-
+from .models import Transaction
+import logging
 Base.metadata.create_all(bind=engine)
-
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 app = FastAPI(title="WFG Transaction Webhook Service")
 
 # Health Check
@@ -26,13 +29,24 @@ def receive_webhook(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    # Idempotency check
-    if get_transaction(db, payload.transaction_id):
-        return
+    try:
+        start = time.time()
 
-    create_transaction(db, payload)
-    background_tasks.add_task(process_transaction, payload.transaction_id)
+        txn = Transaction(**payload.dict())
+        db.add(txn)
+        db.commit()
+
+        db_time_ms = (time.time() - start) * 1000
+        logger.info(f"DB time: {db_time_ms:.2f} ms")
+
+        background_tasks.add_task(process_transaction, payload.transaction_id)
+
+    except Exception as e:
+        db.rollback()
+        raise e
+
     return
+
 
 # Get Transaction Status (LIST response as required)
 @app.get(
@@ -43,8 +57,20 @@ def get_transaction_status(
     transaction_id: str,
     db: Session = Depends(get_db)
 ):
-    txn = get_transaction(db, transaction_id)
+    # Single optimized query
+    txn = db.query(Transaction).filter(
+        Transaction.transaction_id == transaction_id
+    ).first()
+    
     if not txn:
         raise HTTPException(status_code=404, detail="Transaction not found")
-
+    
     return [txn]
+
+@app.middleware("http")
+async def latency_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    latency_ms = (time.perf_counter() - start) * 1000
+    response.headers["X-Latency-ms"] = f"{latency_ms:.2f}"
+    return response

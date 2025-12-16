@@ -8,5 +8,7 @@ def process_transaction(transaction_id: str):
     db = SessionLocal()
     try:
         mark_processed(db, transaction_id)
+    except Exception as e:
+        print(f"Error processing {transaction_id}: {e}")
     finally:
         db.close()
