@@ -23,6 +23,7 @@ def health_check():
     }
 
 # Webhook Endpoint
+
 @app.post("/v1/webhooks/transactions", status_code=202)
 def receive_webhook(
     payload: TransactionCreate,
@@ -32,6 +33,17 @@ def receive_webhook(
     try:
         start = time.time()
 
+        # ✅ Idempotency check
+        existing_txn = db.query(Transaction).filter(
+            Transaction.transaction_id == payload.transaction_id
+        ).first()
+
+        if existing_txn:
+            logger.info(
+                f"Duplicate webhook received for {payload.transaction_id}"
+            )
+            return  # ✅ silently accept duplicate
+
         txn = Transaction(**payload.dict())
         db.add(txn)
         db.commit()
@@ -39,11 +51,15 @@ def receive_webhook(
         db_time_ms = (time.time() - start) * 1000
         logger.info(f"DB time: {db_time_ms:.2f} ms")
 
-        background_tasks.add_task(process_transaction, payload.transaction_id)
+        background_tasks.add_task(
+            process_transaction,
+            payload.transaction_id
+        )
 
     except Exception as e:
         db.rollback()
-        raise e
+        logger.exception("Webhook processing failed")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
     return
 
